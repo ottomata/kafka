@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.kafka.connect.transforms;
 
 import org.apache.kafka.common.config.ConfigDef;
@@ -24,6 +25,9 @@ import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.DataException;
 import org.apache.kafka.connect.transforms.util.SimpleConfig;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -39,13 +43,15 @@ import static org.apache.kafka.connect.transforms.util.Requirements.requireNoSch
 public abstract class SetSchema<R extends ConnectRecord<R>> implements Transformation<R> {
 
     public static final String OVERVIEW_DOC =
-            "Apply a schema to schemaless data, either using a predefined schema against which the data is validated " +
-                    "or by inferring a schema based on the data. " +
-                    "Schemas can be applied to the key (<code>" + Key.class.getName() + "</code>)"
-                    + " or value (<code>" + Value.class.getName() + "</code>). " +
-                    "When using inferred schemas, combine with the SetSchemaMetadata transformation if you also need " +
-                    "to set the name or version. Inferred schemas are always optional and use optional schemas for " +
-                    "Struct fields, array elements, and map elements.";
+        "Apply a schema to schemaless data, either using a predefined schema against which the data is validated " +
+        "or by inferring a schema based on the data. " +
+        "Schemas can be applied to the key (<code>" + Key.class.getName() + "</code>)" + 
+        " or value (<code>" + Value.class.getName() + "</code>). " +
+        "When using inferred schemas, combine with the SetSchemaMetadata transformation if you also need " +
+        "to set the name or version. Inferred schemas are always optional and use optional schemas for " +
+        "Struct fields, array elements, and map elements.";
+
+    private static final Logger log = LoggerFactory.getLogger(SetSchema.class);
 
     public static final ConfigDef CONFIG_DEF = new ConfigDef();
 
@@ -118,6 +124,10 @@ public abstract class SetSchema<R extends ConnectRecord<R>> implements Transform
     }
 
     private SchemaAndValue inferSchema(Object value) {
+        return inferSchema(value, null);
+    }
+
+    private SchemaAndValue inferSchema(Object value, String name) {
         if (value == null) {
             return null;
         }
@@ -181,7 +191,17 @@ public abstract class SetSchema<R extends ConnectRecord<R>> implements Transform
             }
 
             // Pass 1 to build the schema
-            SchemaBuilder builder = SchemaBuilder.struct().optional();
+            SchemaBuilder builder = SchemaBuilder.struct();
+            // We don't want the top level data to be 'optional', as that can
+            // result in e.g. top level Avro UNION types down the line.  The only case
+            // where we might be infering from a Map AND a field name hasn't been passed
+            // in recursively is the first top level call.  Only make this field
+            // optional if it was given a field name.
+            if (name != null) {
+                log.debug("Setting field `" + name + "` as optional.");
+                builder.optional();
+            }
+
             // Temporary holder for converted values
             Map<String, Object> convertedFields = new HashMap();
             for (Object key : Arrays.asList(keys)) {
@@ -193,15 +213,20 @@ public abstract class SetSchema<R extends ConnectRecord<R>> implements Transform
                     throw new DataException("Inferred schemas must have string keys, found " + keyConverted);
                 }
 
+                String fieldName = (String) keyConverted.value();
+
                 Object fieldValue = mapValue.get(key);
                 if (fieldValue == null) {
                     throw new DataException("Map values may not be null");
                 }
-                SchemaAndValue valueConverted = inferSchema(fieldValue);
-                builder.field((String) keyConverted.value(), valueConverted.schema());
-                convertedFields.put((String) key, valueConverted.value());
+                SchemaAndValue valueConverted = inferSchema(fieldValue, fieldName);
+                builder.field(fieldName, valueConverted.schema());
+                convertedFields.put(fieldName, valueConverted.value());
             }
 
+            if (name != null) {
+                builder.name(name);
+            }
             Schema schema = builder.build();
 
             // Pass 2 to build the value
